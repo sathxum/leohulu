@@ -1,0 +1,168 @@
+name: Nexus RDP Deployment
+on: 
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/workflows/nexus-rdp.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      
+    - name: Setup Environment
+      shell: pwsh
+      run: |
+        Write-Host "╔════════════════════════════════════╗" -ForegroundColor Cyan
+        Write-Host "║     NEXUS RDP DEPLOYMENT v2.2      ║" -ForegroundColor Cyan
+        Write-Host "╚════════════════════════════════════╝" -ForegroundColor Cyan
+        Write-Host "[INFO] Trigger: ${{ github.event_name }}" -ForegroundColor Yellow
+        Write-Host "[INFO] Visibility: PUBLIC" -ForegroundColor Yellow
+        
+    - name: Install Ngrok
+      shell: pwsh
+      run: |
+        Write-Host "[INFO] Installing Ngrok..." -ForegroundColor Yellow
+        Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+        Expand-Archive ngrok.zip -DestinationPath .
+        Move-Item .\ngrok.exe C:\Windows\System32\ngrok.exe -Force
+        Write-Host "[SUCCESS] Ngrok installed" -ForegroundColor Green
+        
+    - name: Start Ngrok Tunnel
+      shell: pwsh
+      run: |
+        Write-Host "[INFO] Configuring Ngrok..." -ForegroundColor Yellow
+        ngrok config add-authtoken 3A1U8v4Hgshl3u7YbgmbDwX557U_2qkyufwhBM51Z3fXnhBjv
+        
+        Write-Host "[INFO] Starting Ngrok tunnel..." -ForegroundColor Yellow
+        # Start ngrok in background and log to file
+        Start-Process -FilePath "ngrok" -ArgumentList "tcp 3389 --log stdout" -RedirectStandardOutput "ngrok.log" -WindowStyle Hidden
+        
+        Write-Host "[INFO] Waiting for tunnel to establish..." -ForegroundColor Yellow
+        
+        # Wait and check log file for URL
+        $url = $null
+        for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            
+            if (Test-Path "ngrok.log") {
+                $content = Get-Content "ngrok.log" -Raw -ErrorAction SilentlyContinue
+                if ($content) {
+                    # Look for url=tcp:// pattern
+                    if ($content -match 'url=tcp://([^\s]+)') {
+                        $url = $matches[1]
+                        Write-Host "[SUCCESS] Tunnel URL found: $url" -ForegroundColor Green
+                        break
+                    }
+                }
+            }
+            
+            Write-Host "[INFO] Waiting for tunnel... ($i/30)" -ForegroundColor Gray
+        }
+        
+        if ($url) {
+            "NGROK_URL=$url" | Out-File -FilePath ngrok_url.txt
+            Write-Host "[SUCCESS] URL saved to ngrok_url.txt" -ForegroundColor Green
+        } else {
+            Write-Host "[WARNING] Could not find URL in logs, will check later" -ForegroundColor Yellow
+        }
+        
+    - name: Configure RDP
+      shell: pwsh
+      run: |
+        Write-Host "[INFO] Configuring RDP..." -ForegroundColor Yellow
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+        Write-Host "[SUCCESS] RDP configured" -ForegroundColor Green
+        
+    - name: Create User Account
+      shell: pwsh
+      run: |
+        Write-Host "[INFO] Creating user account..." -ForegroundColor Yellow
+        $password = ConvertTo-SecureString "prabhat@123&" -AsPlainText -Force
+        New-LocalUser "sinket" -Password $password -FullName "Nexus Admin" -Description "Auto-generated RDP User" -ErrorAction SilentlyContinue
+        Add-LocalGroupMember -Group "Administrators" -Member "sinket" -ErrorAction SilentlyContinue
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "sinket" -ErrorAction SilentlyContinue
+        Write-Host "[SUCCESS] User sinket created successfully" -ForegroundColor Green
+        
+    - name: Disable Power Saving
+      shell: pwsh
+      run: |
+        powercfg /change monitor-timeout-ac 0
+        powercfg /change standby-timeout-ac 0
+        
+    - name: Display Connection Info
+      shell: pwsh
+      run: |
+        Write-Host "" 
+        Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+        Write-Host "         CONNECTION INFORMATION                    " -ForegroundColor Cyan
+        Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+        Write-Host ""
+        
+        # Try to get URL from file
+        $url = $null
+        if (Test-Path "ngrok_url.txt") {
+            $content = Get-Content "ngrok_url.txt"
+            if ($content -match 'NGROK_URL=(.+)') {
+                $url = $matches[1]
+            }
+        }
+        
+        # If not found, try reading log directly
+        if (-not $url -and (Test-Path "ngrok.log")) {
+            $content = Get-Content "ngrok.log" -Raw
+            if ($content -match 'url=tcp://([^\s]+)') {
+                $url = $matches[1]
+            }
+        }
+        
+        if ($url) {
+            # Parse host and port
+            $parts = $url -split ':'
+            $host = $parts[0]
+            $port = $parts[1]
+            
+            Write-Host "  RDP HOST:     $host" -ForegroundColor Green
+            Write-Host "  RDP PORT:     $port" -ForegroundColor Green
+            Write-Host "  USERNAME:     sinket" -ForegroundColor Green
+            Write-Host "  PASSWORD:     prabhat@123&" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "  FULL ADDRESS: $url" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+            
+            # Save connection info
+            "Connection Details:" | Out-File -FilePath connection_info.txt
+            "Host: $host" | Out-File -FilePath connection_info.txt -Append
+            "Port: $port" | Out-File -FilePath connection_info.txt -Append
+            "Username: sinket" | Out-File -FilePath connection_info.txt -Append
+            "Password: prabhat@123&" | Out-File -FilePath connection_info.txt -Append
+            "Full Address: $url" | Out-File -FilePath connection_info.txt -Append
+            
+            Write-Host "[SUCCESS] Connection info saved!" -ForegroundColor Green
+        } else {
+            Write-Host "[ERROR] Could not retrieve ngrok URL from logs" -ForegroundColor Red
+            Write-Host "[INFO] Check ngrok.log file for details" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  USERNAME:     sinket" -ForegroundColor Green
+            Write-Host "  PASSWORD:     prabhat@123&" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "[INFO] Check ngrok dashboard: https://dashboard.ngrok.com/endpoints" -ForegroundColor Yellow
+        }
+        Write-Host ""
+        
+    - name: Keep Alive
+      shell: pwsh
+      run: |
+        Write-Host "[INFO] Session active for 6 hours max..." -ForegroundColor Yellow
+        for ($i = 360; $i -gt 0; $i--) {
+            Write-Host "Time remaining: $i minutes" -ForegroundColor Gray
+            Start-Sleep -Seconds 60
+        }
